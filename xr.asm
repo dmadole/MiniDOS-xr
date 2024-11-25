@@ -43,6 +43,7 @@ start:      br    initial
 
 #define NUL 0       ; null is used instead of zero
 #define SOH 1       ; start-of-header starts 128-byte packet
+#define ETX 3       ; end-of-test recognized to cancel (control-c)
 #define EOT 4       ; end-of-text is received after all packets
 #define ACK 6       ; acknowledge is send following a valid packet
 #define NAK 21      ; negative acknowledgement is sent after an error
@@ -289,6 +290,9 @@ recvsoh:    ghi   ra                    ; reset pointer to current buffer
             xri   EOT^SOH               ; if eot then transfer is all done
             lbz   alldone
 
+            xri   ETX^EOT               ; if eot then transfer is all done
+            lbz   abandon
+
             lbr   waitnak               ; any thing else, flush input and nak
 
 
@@ -466,6 +470,24 @@ sendack:    ghi   r7                    ; set subroutine pointer to send
             lbr   recvsoh               ; and then get the next packet
 
 
+
+abandon:    ldi   cleanup.1             ; point to subroutine to restore
+            phi   r7
+            ldi   cleanup.0
+            plo   r7
+
+            sep   r7                    ; recover r5,r6 and set pc to r3
+
+            sep   scall
+            dw    o_inmsg
+            db    'cancelled.',13,10,0
+
+            sep   scall
+            dw    o_close
+
+            sep   sret
+
+
           ; After the last data packet, acknowledge the EOT end marker, then
           ; return back to the normal program counter and SCRT setup for
           ; final file operations and return to kernel.
@@ -476,32 +498,19 @@ alldone:    ghi   r7                    ; set subroutine pointer to send
             ldi   ACK                   ; acknowledge end of packets
             sep   r5
 
-            ldi   cleanup.1             ; prepare to change to r3
-            phi   r3
+          ; Restore the normal SCRT environment, flush the buffer to disk,
+          ; output sucess and return.
+
+            ldi   cleanup.1             ; point to subroutine to restore
+            phi   r7
             ldi   cleanup.0
-            plo   r3
+            plo   r7
 
-            sep   r3                    ; switch program counter to r3
-
-cleanup:    irx                         ; restore scrt return pointer
-            ldxa
-            phi   r5
-            ldxa
-            plo   r5
-
-            ldxa                        ; restore return to kernel address
-            phi   r6
-            ldxa
-            plo   r6
-
-            ldx                         ; restore terminal echo flag
-            phi   re
-
+            sep   r7                    ; recover r5,r6 and set pc to r3
 
             sep   scall
             dw    o_inmsg
             db    'complete.',13,10,0
-
 
             glo   rf                    ; get length of data in buffer
             smi   buffer.0
@@ -523,6 +532,32 @@ cleanup:    irx                         ; restore scrt return pointer
 
             ldi   0                     ; return with success status
             sep   sret
+
+
+          ; Reset the system to the normal SCRT environment by restoring r5
+          ; and r6 and resetting the program counter to r3. Also restore the
+          ; echo flag in RE.1.
+
+cleanup:    ghi   r6                    ; move return address to r3
+            phi   r3
+            glo   r6
+            plo   r3
+
+            irx                         ; restore scrt return pointer
+            ldxa
+            phi   r5
+            ldxa
+            plo   r5
+
+            ldxa                        ; restore return to kernel address
+            phi   r6
+            ldxa
+            plo   r6
+
+            ldx                         ; restore terminal echo flag
+            phi   re
+
+            sep   r3                    ; reset program counter to r3
 
 
           ; When we have a full 512-byte buffer, this subroutine writes it out
