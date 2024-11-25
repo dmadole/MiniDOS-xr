@@ -57,19 +57,8 @@ start:      br    initial
 #define SEMK seq    ; set mark output
 
 
-          ; XMODEM only makes sense to use on a serial console, so if a video
-          ; console is being used, fail and quit.
          
-initial:    ghi   re                    ; if re is 0feh or 0ffh then video
-            adi   2
-            lbnf  skipspc
-
-            sep   scall                 ; output error message
-            dw    o_inmsg
-            db    'ERROR: requires a serial console',13,10,0
-
-            ldi   1                     ; return with error status
-            sep   sret
+initial:
 
 
           ; Proces the command-line argument, first skip any leading spaces,
@@ -160,7 +149,61 @@ proceed:    ghi   re                    ; save terminal control echo flag
             ani   %11111110             ; clear the echo flag for xmodem
             phi   re
 
-            glo   r6                    ; save r6 for main program counter
+            adi   %00000010             ; if 0 or 254 then use uart port
+            ani   %11111100
+            lbz   setuart
+
+          ; Since RE.1 is between 2 and 254 then it means its a bit delay
+          ; time and we are using the soft UART. Now decide which one.
+
+            sep   scall                 ; say which we have chosen
+            dw    o_inmsg
+            db    'Receive XMODEM using EF/Q port... ',0
+
+          ; If BIOS is MBIOS based on first version byte being 2, then we
+          ; should use Nitro timing, otherwise use Riley timing.
+
+            ldi   0fff9h.1              ; get pointer to version in bios
+            phi   rb
+            ldi   0fff9h.0
+            plo   rb
+
+            ldn   rb                    ; if first byte is 2 then mbios
+            smi   2
+            lbz   ismbios
+
+            ldi   getsefq.0             ; else riley bios, set slow uart
+            plo   r7
+            ldi   putsefq.0
+            phi   r7
+
+            lbr   prepare               ; and start xmodem transfer
+
+ismbios:    ldi   getnitr.0             ; mbios to set fast nitro uart
+            plo   r7
+            ldi   putnitr.0
+            phi   r7
+
+            lbr   prepare               ; and start xmodem transfer
+
+
+          ; Since the UART code works through the BIOS API, it is universal
+          ; regardless of the port or BIOS types.
+
+setuart:    sep   scall                 ; say which we have chosen
+            dw    o_inmsg
+            db    'Receive XMODEM using UART port... ',0
+
+            ldi   getuart.0             ; set routines for uart console port
+            plo   r7
+            ldi   putuart.0
+            phi   r7
+
+
+          ; Now that the UART is selected switch up the program counter
+          ; and subroutine counter to prepare for transfer.
+
+prepare:    glo   r6                    ; save r6 for main program counter
             stxd
             ghi   r6
             stxd
@@ -198,26 +241,11 @@ startit:    ldi   0                     ; clear flag bits
           ; low bytes for send and receive into r7 high and low bytes based
           ; on which interface we are using.
 
-            ldi   getbits.1             ; set msb to the subroutine page
+            ldi   getuart.1             ; set msb to the subroutine page
             phi   r5
 
-            ghi   re                    ; if bits 7-1 are zero then uart port
-            ani   %11111110
-            lbz   setuart
-
-            ldi   getbits.0             ; else bit-banged port, set routines
+            glo   r7                    ; set subroutine pointer to input
             plo   r5
-            plo   r7
-            ldi   putbits.0
-            phi   r7
-
-            lbr   waitnak               ; and start xmodem transfer
-
-setuart:    ldi   getuart.0             ; set routines for uart console port
-            plo   r5
-            plo   r7
-            ldi   putuart.0
-            phi   r7
 
 
           ; Flush the input until nothing has been received for about one
@@ -469,6 +497,12 @@ cleanup:    irx                         ; restore scrt return pointer
             ldx                         ; restore terminal echo flag
             phi   re
 
+
+            sep   scall
+            dw    o_inmsg
+            db    'complete.',13,10,0
+
+
             glo   rf                    ; get length of data in buffer
             smi   buffer.0
             plo   rc
@@ -522,7 +556,7 @@ dowrite:    irx                         ; restore the srt return routine
             ghi   r5
             stxd
 
-            ldi   getbits.1               ; setup pointer to console routines
+            ldi   getuart.1               ; setup pointer to console routines
             phi   r5
             glo   r7
             plo   r5
@@ -530,23 +564,16 @@ dowrite:    irx                         ; restore the srt return routine
             sep   r6                    ; return to main program
 
 
-          ; ------------------------------------------------------------------
-          ; Send a byte through the UART using the F_UTYPE routine in BIOS.
-          ; Aside from the calling convention, this is very simple. Return
-          ; through GETUART so that the PC is setup for sending a byte.
+fildes:     dw    0,0
+            dw    dta
+            dw    0
+            db    0
+            dw    0,0
+            dw    0
+            dw    0,0
 
-putuart:    plo   re                    ; save the byte to send
 
-            ldi   f_utype.1             ; set subroutine pointer to type
-            phi   r3
-            ldi   f_utype.0
-            plo   r3
-
-            glo   re                    ; get output byte and send it
-            sep   r3
-
-            br    uartret               ; return through getuart
-
+            org   (($-1)|255)+1
 
           ; ------------------------------------------------------------------
           ; This implements a receive byte with timeout function for the UART
@@ -590,6 +617,24 @@ getuart:    ldi   f_utest.1             ; set subroutine pointer to test
 
 
           ; ------------------------------------------------------------------
+          ; Send a byte through the UART using the F_UTYPE routine in BIOS.
+          ; Aside from the calling convention, this is very simple. Return
+          ; through GETUART so that the PC is setup for sending a byte.
+
+putuart:    plo   re                    ; save the byte to send
+
+            ldi   f_utype.1             ; set subroutine pointer to type
+            phi   r3
+            ldi   f_utype.0
+            plo   r3
+
+            glo   re                    ; get output byte and send it
+            sep   r3
+
+            br    uartret               ; return through getuart
+
+
+          ; ------------------------------------------------------------------
           ; This is a complex update of the Nitro UART from MBIOS; it has been
           ; modified to move the cycles for the bit rate factor decompression
           ; into the time of the start bit to minimize time and allow back-to-
@@ -603,60 +648,60 @@ getuart:    ldi   f_utest.1             ; set subroutine pointer to test
           ; point is just before the entry point to facilitate calling by SEP
           ; by causing the entry point to be reset automaticaly each call.
 
+
           ; If greater than 64, then 1.5 bit times is more than 8 bits so we
           ; can't simply use the normal delay loop which has an 8-bit counter.
           ; So we do the half bit first then fall into a normal one-bit delay.
 
-bitcomp:    shl                         ; double then add back and save
+nitcomp:    shl                         ; double then add back and save
             add
             str   r2
 
             shr                         ; half and adjust for cycle count
             smi   6
 
-bithalf:    smi   4                     ; delay in increments of 4 cycles
-            bdf   bithalf
+nithalf:    smi   4                     ; delay in increments of 4 cycles
+            bdf   nithalf
 
-            adi   bitfrac+1             ; calculate jump from remainder
+            adi   nitfrac+1             ; calculate jump from remainder
             plo   r5
 
             skp                         ; delay for between 2-5 cycles
             skp
             lskp
-bitfrac:    ldi   0
+nitfrac:    ldi   0
 
-          ; Delay for a full bit time using pre-calculated value from stack.
+          ; Delay for a full bit time using decompressed value from stack.
 
-bitloop:    ldn   r2                   ; get delay time
+nitloop:    ldn   r2                   ; get delay time
 
-bittime:    smi   4                    ; delay in increments of 4 cycles
-            bdf   bittime
+nittime:    smi   4                    ; delay in increments of 4 cycles
+            bdf   nittime
 
-            adi   bitjump+1            ; calculate jump from remainder
+            adi   nitjump+1            ; calculate jump from remainder
             plo   r5
 
             skp                        ; delay for between 2-5 cycles
             skp
             lskp
-bitjump:    ldi   0
+nitjump:    ldi   0
 
-            BRSP  bitspac               ; if space then shift in a zero bit
+            BRSP  nitspac               ; if space then shift in a zero bit
 
             glo   re                    ; data is mark so shift in a one bit
             shrc
-            br    bitnext
+            br    nitnext
 
-bitspac:    glo   re                    ; data is space so shift in a zero
+nitspac:    glo   re                    ; data is space so shift in a zero
             shr
-            br    bitnext
+            plo   re
 
-bitnext:    plo   re                    ; more bits to read if byte not zero
-            bdf   bitloop
+nitnext:    plo   re                    ; more bits to read if byte not zero
+            bdf   nitloop
 
-bitstop:    BRSP  bitstop               ; wait until the stop bit starts
+nitstop:    BRSP  nitstop               ; wait until the stop bit starts
 
-bitretn:    sep   r6                    ; return with pc pointing to start
-
+nitretn:    sep   r6                    ; return with pc pointing to start
 
           ; This is the entry point of the bit-bang UART receive routine. The
           ; first thing to do is watch for a start bit, but we need to have a
@@ -664,31 +709,31 @@ bitretn:    sep   r6                    ; return with pc pointing to start
           ; timing resolution, we check for the start bit change every-other
           ; instruction interleaved into the timing loop.
 
-getbits:    BRSP  bitinit               ; loop within the loop to add time
+getnitr:    BRSP  nitinit               ; loop within the loop to add time
             ldi   3
 
-bitdlay:    BRSP  bitinit               ; decrement loop counter in d
+nitdlay:    BRSP  nitinit               ; decrement loop counter in d
             smi   1
 
-            BRSP  bitinit               ; loop until delay finished
-            lbnz  bitdlay
+            BRSP  nitinit               ; loop until delay finished
+            lbnz  nitdlay
 
-            BRSP  bitinit               ; decrement main timer loop counter
+            BRSP  nitinit               ; decrement main timer loop counter
             dec   rb
 
-            BRSP  bitinit               ; check the high byte for zero
+            BRSP  nitinit               ; check the high byte for zero
             ghi   rb
 
-            BRSP  bitinit               ; if zero, then we have timed out
-            lbz   bitretn
+            BRSP  nitinit               ; if zero, then we have timed out
+            lbz   nitretn
 
-            BRMK  getbits               ; continue until something happens
+            BRMK  getnitr               ; continue until something happens
 
           ; The same shift register that is used to receive bits into is also
           ; used to count loops by preloading it with all ones except the last
           ; bit, which will shift out as zero when all the register is full.
 
-bitinit:    ldi   %01111111              ; set stop bit into byte buffer
+nitinit:    ldi   %01111111              ; set stop bit into byte buffer
             plo   re
 
           ; If the time factor is greater than 64 then we add twice the amount
@@ -702,7 +747,7 @@ bitinit:    ldi   %01111111              ; set stop bit into byte buffer
             str   r2                    ; on stack for below and re for use
 
             smi   63                    ; if value is less than 63 leave as-is
-            bdf   bitcomp
+            bdf   nitcomp
 
           ; If we are in the 0 to 63 part of the range, simply add half back
           ; to the value to get the 1.5 bit times from start bit to the middle
@@ -712,7 +757,7 @@ bitinit:    ldi   %01111111              ; set stop bit into byte buffer
             shr
             add
 
-            br    bittime               ; enter regular bit delay routine
+            br    nittime               ; enter regular bit delay routine
 
 
           ; ------------------------------------------------------------------
@@ -722,7 +767,7 @@ bitinit:    ldi   %01111111              ; set stop bit into byte buffer
           ; other end. To avoid stop bit violations, we therefore need to 
           ; delay on entry just a little less than a bit time.
 
-putbits:    plo   re                    ; save byte to send to shift register
+putnitr:    plo   re                    ; save byte to send to shift register
 
             ghi   re                    ; uncompress the stored delay value,
             shr
@@ -730,7 +775,7 @@ putbits:    plo   re                    ; save byte to send to shift register
             str   r2                    ; on stack for below and re for use
 
             smi   63                    ; if value is less than 63 leave as-is
-            bnf   bitwait
+            bnf   nitwait
 
             shl                         ; otherwise multiply by 2 then add to
             add                         ; saved value giving final range, save
@@ -738,8 +783,8 @@ putbits:    plo   re                    ; save byte to send to shift register
 
             smi   4                     ; adjust for extra decompression time
 
-bitwait:    smi   4                     ; wait for minimum stop bit time
-            bdf   bitwait
+nitwait:    smi   4                     ; wait for minimum stop bit time
+            bdf   nitwait
 
           ; Once the stop bit is timed, send the start bit and delay, and end
           ; the delay with DF set as we then jump into the send loop and this
@@ -751,10 +796,10 @@ bitwait:    smi   4                     ; wait for minimum stop bit time
             ldn   r2                    ; get bit time, do again as a no-op
             ldn   r2
 
-bitstrt:    smi   4                     ; delay 4 cycles for each 4 counts
-            bdf   bitstrt
+nitstrt:    smi   4                     ; delay 4 cycles for each 4 counts
+            bdf   nitstrt
 
-            adi   bitsetf+1             ; jump into table for fine delay
+            adi   nitsetf+1             ; jump into table for fine delay
             plo   r5
 
           ; For each bit we time the bulk delay with a loop and then jump into
@@ -763,50 +808,188 @@ bitstrt:    smi   4                     ; delay 4 cycles for each 4 counts
           ; Exit from the delay with DF clear as this will get shifted into
           ; the shift register, when it is all zeros that marks the end.
 
-bitmore:    ldn   r2                    ; get bit time factor
+nitmore:    ldn   r2                    ; get bit time factor
 
-bitbits:    smi   4                     ; delay 4 cycles for each 4 counts
-            bdf   bitbits
+nitbits:    smi   4                     ; delay 4 cycles for each 4 counts
+            bdf   nitbits
 
-            sdi   bitclrf-1             ; jump into table for fine delay
+            sdi   nitclrf-1             ; jump into table for fine delay
             plo   r5
 
-bitclrf:    skp                         ; delays from here are 5,4,3,2 cycles
+nitclrf:    skp                         ; delays from here are 5,4,3,2 cycles
             skp
             lskp
-bitsetf:    ldi   0
+nitsetf:    ldi   0
 
             glo   re                    ; shift count bit in, data bit out
             shrc
             plo   re
 
-            bdf   bitmark               ; if bit is one then that's a mark
+            bdf   nitmark               ; if bit is one then that's a mark
 
             SESP                        ; else set space output, next bit
-            br    bitmore
+            br    nitmore
 
-bitmark:    SEMK                        ; set mark output, do next bit
-            bnz   bitmore
+nitmark:    SEMK                        ; set mark output, do next bit
+            bnz   nitmore
 
           ; When the shift register is all zeros, we have sent 8 data bits and
           ; set the stop bit level. Return through the SEP in GETBITS so that
           ; the PC is reset to receive a byte each time after sending one.
 
-            br    bitretn               ; return through getbits to set pc
+            br    nitretn               ; return through getbits to set pc
 
 
-fildes:     dw    0,0
-            dw    dta
-            dw    0
-            db    0
-            dw    0,0
-            dw    0
-            dw    0,0
+          ; -----------------------------------------------------------------
+          ; This is a simplified version of the Nitro soft UART implementing
+          ; the same timing as the Mike Riley BIOS UART. Since the resolution
+          ; is eight cycles the timing is much less complex, and there is
+          ; also no decompression needed of the timing factor.
+          ; 
+          ; Like the version above, this has been folded so that thr return
+          ; point is just before the entry point so that the program counter
+          ; gets set for a repeated call.
+
+
+          ; The delay after the start bit needs to be 1.5 times the bit time.
+          ; This is implemented with a separate loop that delays 4 cycles per
+          ; count which is the 0.5 part, then it falls into the regular bit
+          ; delay of eight cycles per count, giving 12 cycles total.
+
+efqcomp:    ghi   re                    ; delay four cycles per count
+efqhalf:    smi   2
+            bdf   efqhalf
+
+          ; This is where we loop back for each additional bit afterward
+
+efqloop:    ghi   re                    ; delay eitght cycles per count
+efqtime:    smi   2
+            nop
+            lbdf  efqtime
+
+            nop                         ; to make the timing just perfect
+
+            BRMK  efqshrc               ; if space then shift in a zero bit
+
+            glo   re                    ; data is space so shift in a zero
+            shr
+            br    efqnext
+
+efqshrc:    shl
+            glo   re                    ; data is mark so shift in a one bit
+            shrc
+
+efqnext:    plo   re                    ; save new bit, delay a little more
+            nop
+            nop
+
+            lbdf  efqloop               ; more bits until stop bit emerges
+
+efqstop:    BRSP  efqstop               ; wait until the stop bit starts
+
+efqretn:    sep   r6                    ; return with pc pointing to start
+
+          ; This is the entry point of the bit-bang UART receive routine. The
+          ; first thing to do is watch for a start bit, but we need to have a
+          ; time limit of how long to wait. Since we need to maintain high
+          ; timing resolution, we check for the start bit change every-other
+          ; instruction interleaved into the timing loop.
+
+getsefq:    BRSP  efqinit               ; loop within the loop to add time
+            ldi   3
+
+efqdlay:    BRSP  efqinit               ; decrement loop counter in d
+            smi   1
+
+            BRSP  efqinit               ; loop until delay finished
+            lbnz  efqdlay
+
+            BRSP  efqinit               ; decrement main timer loop counter
+            dec   rb
+
+            BRSP  efqinit               ; check the high byte for zero
+            ghi   rb
+
+            BRSP  efqinit               ; if zero, then we have timed out
+            lbz   efqretn
+
+            BRMK  getsefq               ; continue until something happens
+
+          ; The same shift register that is used to receive bits into is also
+          ; used to count loops by preloading it with all ones except the last
+          ; bit, which will shift out as zero when all the register is full.
+
+efqinit:    ldi   %01111111              ; set stop bit into byte buffer
+            plo   re
+
+            lbr   efqcomp                ; enter regular bit delay routine
+
+
+          ; -----------------------------------------------------------------
+          ; The send version of Nitro adapted to Riley BIOS soft UART timing.
+
+putsefq:    plo   re                    ; save byte to send to shift register
+
+            ghi   re                    ; wait for minimum stop bit time
+efqwait:    smi   2
+            nop
+            lbdf  efqwait
+
+          ; Once the stop bit is timed, send the start bit and delay, and end
+          ; the delay with DF set as we then jump into the send loop and this
+          ; level will get shifted into the shift register just before we exit
+          ; and so determines the stop bit level.
+
+            ghi   re                    ; here and twice for timing reasons
+            ghi   re
+
+            SESP                        ; set start bit at space level
+
+efqstrt:    smi   2                     ; delay eight cycles per count
+            nop
+            lbdf  efqstrt
+
+            shl                         ; d is negative so this sets df
+            lbr  efqshft
+
+          ; This is where subsequent bits loop back after the start.
+
+efqmore:    ghi   re                    ; delay 4 cycles for each 4 counts
+efqbits:    smi   2
+            nop
+            lbdf  efqbits
+
+efqshft:    nop                         ; extra delay for timing
+            nop
+            nop
+
+            glo   re                    ; shift count bit in, data bit out
+            shrc
+            plo   re
+
+            bdf   efqmark               ; if bit is one then that's a mark
+
+            SESP                        ; else set space output, next bit
+            lbr   efqmore
+
+efqmark:    SEMK                        ; set mark output, do next bit
+            lbnz  efqmore
+
+          ; When the shift register is all zeros, we have sent 8 data bits and
+          ; set the stop bit level. Return through the SEP in GETBITS so that
+          ; the PC is reset to receive a byte each time after sending one.
+
+            lbr   efqretn               ; return through getbits to set pc
+
+
+          ; The data buffer needs to be page aligned to simplify the pointer
+          ; math so go ahead and align both of these here. Neither is 
+          ; included in the executable though since they are 'ds'.
 
             org   (($-1)|255)+1
 
-dta:        ds    512
-buffer:     ds    512
+dta:        ds    512                   ; sector buffer for fildes
+buffer:     ds    512                   ; xmodem data receive buffer
 
 end:        end   begin
 
