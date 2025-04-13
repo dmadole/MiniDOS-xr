@@ -52,11 +52,14 @@ start:      br    skipspc
 
           ; I/O pin definitions for the bit-bang serial routines. These are by
           ; default compatible with the 1802/Mini and Pico/Elf machines.
+          ; 
+          ; BRMK and BRSP branch on mark and space input, resepectively, and
+          ; and SEMK and SESP set the output to the mark and space states.
 
-#define BRMK bn2    ; branch on mark input
-#define BRSP b2     ; branch on space input
-#define SESP req    ; set space output
-#define SEMK seq    ; set mark output
+#define BRMK bn2
+#define BRSP b2
+#define SESP req
+#define SEMK seq
 
 
           ; Proces the command-line argument, first skip any leading spaces,
